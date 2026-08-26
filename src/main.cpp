@@ -2,7 +2,10 @@
 #include <NimBLEDevice.h>
 #include "board.h"
 #include "config.h"
-#include "portal.h"
+#include "mqtt.h"
+#include "power.h"
+#include "web.h"
+#include "wifi.h"
 
 // The ESP32-C3 is permanently powered from the ATX connector (5VSB), so it runs
 // independently of the PSU's main rails. It controls the SFX PSU through PS_ON#
@@ -20,12 +23,11 @@
 //     follows the board down.
 //   * A background BLE scan watches for the 8BitDo controller advertising; when
 //     it appears while we're OFF, that wakes the machine just like a button tap.
-
-enum PowerState {
-  STATE_OFF,      // PSU released, board down
-  STATE_BOOTING,  // PSU asserted, waiting for TPMS1 to go HIGH
-  STATE_ON,       // PSU asserted, board up (TPMS1 HIGH)
-};
+//   * The device also joins the home WiFi as a client when credentials are
+//     configured (see wifi.cpp); the setup SoftAP comes up as a fallback when
+//     it has nothing to connect to or the connection fails.
+//   * The web dashboard and MQTT (later phases) request power on/off through
+//     the power.h API; requests are flagged and executed on the loop's clock.
 
 static PowerState state = STATE_OFF;
 
@@ -36,7 +38,7 @@ static unsigned long buttonLastChange  = 0;
 static unsigned long pressStart        = 0;
 static bool          pressStartedOff   = false;  // press began while OFF
 static bool          longPressFired    = false;
-static bool          setupFired        = false;
+static bool          factoryFired      = false;
 
 // --- Board-sense debounce ---
 static bool          boardSenseStable  = false;  // debounced TPMS1 HIGH
@@ -54,7 +56,7 @@ static unsigned long          bleInhibitUntil = 0;  // wakes ignored until this
 static unsigned long bootStart    = 0;
 static unsigned long lastHeartbeat = 0;
 
-static const char *stateName(PowerState s) {
+const char *stateName(PowerState s) {
   switch (s) {
     case STATE_OFF:     return "OFF";
     case STATE_BOOTING: return "BOOTING";
@@ -73,6 +75,9 @@ static void setState(PowerState next) {
 // hysteresis so a signal hovering near the logic threshold doesn't chatter.
 static bool senseLevel = false;
 
+// Last averaged reading, exposed via getBoardMv().
+static uint32_t s_lastSenseMv = 0;
+
 static bool readBoardSense(uint32_t *outMv = nullptr) {
   // Average several reads to reject single-sample ADC/line spikes. Without this,
   // one stray spike past SENSE_HIGH_MV chatters the hysteresis and restarts the
@@ -82,6 +87,7 @@ static bool readBoardSense(uint32_t *outMv = nullptr) {
     acc += analogReadMilliVolts(BOARD_SENSE);
   }
   uint32_t mv = acc / SENSE_OVERSAMPLE;
+  s_lastSenseMv = mv;
   if (outMv) *outMv = mv;
   if (senseLevel) {
     if (mv < SENSE_LOW_MV) senseLevel = false;
@@ -124,11 +130,51 @@ static void powerOff(const char *reason, unsigned long now) {
   setState(STATE_OFF);
 }
 
-// NimBLE scan task: just records that the target controller was seen. The wake
+// --- External power requests (web UI / MQTT, called from other tasks) ---
+// Just flags; normalLoop() executes them on its own clock (see powerOn()'s
+// single-clock note). 32-bit atomic flag access, no locking needed.
+static volatile bool reqPowerOn  = false;
+static volatile bool reqPowerOff = false;
+
+void requestPowerOn(const char *source) {
+  Serial.printf("[REQ ] %s -> power on\n", source);
+  reqPowerOn = true;
+}
+
+void requestPowerOff(const char *source) {
+  Serial.printf("[REQ ] %s -> power off\n", source);
+  reqPowerOff = true;
+}
+
+// --- State getters (power.h) ---
+
+PowerState getState() {
+  return state;
+}
+
+uint32_t getBoardMv() {
+  return s_lastSenseMv;
+}
+
+bool isBoardUp() {
+  return boardSenseStable;
+}
+
+bool isBlePresent() {
+  unsigned long now = millis();
+  return bleSeenEver && (now - bleLastSeen) < BLE_PRESENCE_TIMEOUT_MS;
+}
+
+unsigned long getUptimeMs() {
+  return millis();
+}
+
+// NimBLE scan task: just records that a bound controller was seen. The wake
 // decision (edge-detect + state check) happens in loop(), off this task.
+// Matches ANY MAC in config.wakeAddrs (lower-case compare via hasWakeAddr).
 class WakeScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice *dev) override {
-    if (dev->getAddress().toString() == config.wakeAddr.c_str()) {
+    if (hasWakeAddr(dev->getAddress().toString().c_str())) {
       bleLastSeen = millis();
       bleSeenEver = true;
     }
@@ -136,12 +182,20 @@ class WakeScanCallbacks : public NimBLEScanCallbacks {
 };
 
 static WakeScanCallbacks wakeScanCallbacks;
+static bool              g_bleDisabledLogged = false;
+static bool              g_bleScanStarted = false;
 
-static void startBleScan() {
-  if (config.wakeAddr.isEmpty()) {
-    Serial.println("[BLE ] no controller bound; BLE wake disabled "
-                   "(hold button 8s while OFF to configure)");
+void startBleScan() {
+  if (config.wakeAddrs.length() == 0) {
+    if (!g_bleDisabledLogged) {
+      g_bleDisabledLogged = true;
+      Serial.println("[BLE ] no controllers bound; BLE wake disabled "
+                     "(bind one from the web UI)");
+    }
     return;
+  }
+  if (g_bleScanStarted) {
+    NimBLEDevice::getScan()->stop();  // (re)start: replace any running scan
   }
   NimBLEDevice::init("");
   NimBLEScan *scan = NimBLEDevice::getScan();
@@ -150,13 +204,21 @@ static void startBleScan() {
   scan->setInterval(160);      // ms
   scan->setWindow(80);         // ms (<= interval; ~50% duty)
   scan->start(0, false);       // 0 = scan continuously
-  Serial.printf("[BLE ] scanning for controller %s\n", config.wakeAddr.c_str());
+  g_bleScanStarted = true;
+  Serial.printf("[BLE ] scanning for controllers:\n%s",
+                config.wakeAddrs.c_str());
 }
 
-// Persist a setup request and reboot into the WiFi portal.
-static void enterSetupMode(const char *reason) {
-  Serial.printf("[ACT ] %s -> entering setup mode\n", reason);
-  setForceSetup(true);
+void stopBleScan() {
+  if (!g_bleScanStarted) return;
+  NimBLEDevice::getScan()->stop();
+  g_bleScanStarted = false;
+}
+
+// Wipe all config and reboot into the SoftAP setup network (PLAN.md D3).
+static void doFactoryReset(const char *reason) {
+  Serial.printf("[ACT ] %s -> factory reset\n", reason);
+  factoryReset();
   delay(50);
   ESP.restart();
 }
@@ -205,12 +267,10 @@ static void normalBegin() {
 
   Serial.printf("[INIT] state=%s board=%s bound=%s\n",
                 stateName(state), boardSenseStable ? "UP" : "DOWN",
-                config.wakeAddr.isEmpty() ? "(none)" : config.wakeAddr.c_str());
+                config.wakeAddrs.length() ? config.wakeAddrs.c_str() : "(none)");
 
   startBleScan();
 }
-
-static bool g_setupMode = false;
 
 void setup() {
   Serial.begin(115200);
@@ -221,21 +281,41 @@ void setup() {
   }
   Serial.println();
 
+  // Run at 80 MHz: plenty for this duty cycle and keeps idle current well
+  // under the 160 MHz figure (see CPU_FREQ_HZ in board.h). The core started
+  // us at F_CPU (160 MHz); setCpuFrequencyMhz() re-configures it.
+  setCpuFrequencyMhz(CPU_FREQ_HZ / 1000000);
+  Serial.printf("[INIT] CPU clock: %u MHz\n", getCpuFrequencyMhz());
+
   loadConfig();
 
-  // The portal only starts on an explicit request (8s button hold while OFF).
-  // Otherwise we ALWAYS run the normal controller so button control works even
-  // when no Bluetooth controller has been configured.
-  if (config.forceSetup) {
-    g_setupMode = true;
-    portalBegin();
-  } else {
-    normalBegin();
-  }
+  // One always-running mode (PLAN.md D1): the power state machine, WiFi and
+  // the web server are always up. The fallback SoftAP (and with it the setup
+  // experience) is handled by wifiLoop()/webLoop() — no separate setup mode.
+  normalBegin();
+  wifiBegin();
+  webBegin();
+  mqttBegin();
 }
 
 static void normalLoop() {
   unsigned long now = millis();
+
+  // --- External power requests (web UI / MQTT) ---
+  // Executed on this loop's clock; see the requestPowerOn/Off note. "on"
+  // while ON/BOOTING is a no-op, "off" while BOOTING aborts the boot.
+  if (reqPowerOn) {
+    reqPowerOn = false;
+    if (state == STATE_OFF) {
+      powerOn("external request (on)", now);
+    }
+  }
+  if (reqPowerOff) {
+    reqPowerOff = false;
+    if (state != STATE_OFF) {
+      powerOff("external request (off)", now);
+    }
+  }
 
   // --- Sample & debounce inputs ---
   uint32_t senseMv;
@@ -249,26 +329,26 @@ static void normalLoop() {
       pressStart = now;
       pressStartedOff = (state == STATE_OFF);
       longPressFired = false;
-      setupFired = false;
+      factoryFired = false;
       Serial.println("[BTN ] pressed");
     } else {
       // Released. A short tap that began while OFF powers on (power-on is on
-      // release so that a long hold from OFF can mean "enter setup" instead).
+      // release so that a long hold from OFF can mean "factory reset" instead).
       unsigned long held = now - pressStart;
       Serial.printf("[BTN ] released after %lu ms\n", held);
-      if (pressStartedOff && !setupFired && state == STATE_OFF &&
-          held < SETUP_HOLD_MS) {
+      if (pressStartedOff && !factoryFired && state == STATE_OFF &&
+          held < FACTORY_HOLD_MS) {
         powerOn("short press while OFF", now);
       }
     }
   }
 
   // --- Button holds ---
-  if (buttonStable && pressStartedOff && !setupFired &&
-      (now - pressStart) >= SETUP_HOLD_MS) {
-    // Long hold from OFF -> reconfigure (does not power the machine on).
-    setupFired = true;
-    enterSetupMode("long hold (>8s) while OFF");
+  if (buttonStable && pressStartedOff && !factoryFired &&
+      (now - pressStart) >= FACTORY_HOLD_MS) {
+    // Long hold from OFF -> factory reset (does not power the machine on).
+    factoryFired = true;
+    doFactoryReset("long hold (>8s) while OFF");
   }
   if (buttonStable && !pressStartedOff && !longPressFired && state == STATE_ON &&
       (now - pressStart) >= LONG_PRESS_MS) {
@@ -330,9 +410,12 @@ static void normalLoop() {
 }
 
 void loop() {
-  if (g_setupMode) {
-    portalLoop();
-    return;
-  }
+  wifiLoop();
+  mqttLoop();
+  webLoop();
   normalLoop();
+  // Only the loop task idles here — the WiFi stack, NimBLE scan and the async
+  // web server each run in their own tasks and are unaffected (see
+  // LOOP_IDLE_MS in board.h).
+  delay(LOOP_IDLE_MS);
 }

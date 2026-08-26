@@ -58,10 +58,11 @@ const unsigned long DEBOUNCE_MS = 30;
 // Hold the button this long while the board is ON to force it off.
 const unsigned long LONG_PRESS_MS = 5000;
 
-// Hold the button this long while OFF to enter WiFi setup mode (reconfigure the
-// bound controller / password). Longer than LONG_PRESS_MS and only armed for
-// presses that begin while OFF, so it never collides with force-off.
-const unsigned long SETUP_HOLD_MS = 8000;
+// Hold the button this long while OFF to FACTORY RESET: wipe all config
+// (password, WiFi, MQTT, bound controllers) and reboot into the SoftAP setup
+// network (PLAN.md D3). Longer than LONG_PRESS_MS and only armed for presses
+// that begin while OFF, so it never collides with force-off.
+const unsigned long FACTORY_HOLD_MS = 8000;
 
 // TPMS1 must stay LOW continuously for this long before we treat the board as
 // having shut itself down. Filters out brief dips/transients during boot/reset.
@@ -72,8 +73,9 @@ const unsigned long BOARD_OFF_DEBOUNCE_MS = 1500;
 // return to idle (OFF).
 const unsigned long BOOT_TIMEOUT_MS = 10000;
 
-// Periodic heartbeat log interval.
-const unsigned long HEARTBEAT_MS = 1000;
+// Periodic heartbeat log interval. 30 s keeps the serial log readable without
+// affecting anything (logging has no power impact once the PSU is unplugged).
+const unsigned long HEARTBEAT_MS = 30000;
 
 //*******  WiFi setup portal  ***************
 
@@ -86,11 +88,35 @@ const char *const AP_SSID = "BC250 Switch Setup";
 // is confirmed working on this board.
 #define AP_TX_POWER WIFI_POWER_8_5dBm
 
+//*******  Networking  ***************
+
+// mDNS name the device registers on the LAN, so it is reachable at
+// http://bc250-switch.local whenever it is connected to home WiFi.
+const char *const MDNS_NAME = "bc250-switch";
+
+// If STA credentials are set but we've been without a connection for this
+// long, bring up the fallback SoftAP (STA+AP) so the dashboard stays reachable
+// and the WiFi can be reconfigured without a button hold. The SoftAP drops
+// again once STA connects.
+const unsigned long WIFI_FALLBACK_AFTER_MS = 30000;
+
+//*******  CPU / power  ***************
+
+// CPU clock. 80 MHz is plenty for this duty cycle and keeps idle current well
+// under the 160 MHz figure; the slight extra WiFi/BLE handler latency is
+// irrelevant here.
+const uint32_t CPU_FREQ_HZ = 80000000;
+
+// Idle delay at the end of loop(). Only the loop task sleeps here — the WiFi
+// stack, the NimBLE scan task, and the async web server each run in their own
+// tasks and are unaffected.
+const unsigned long LOOP_IDLE_MS = 5;
+
 //*******  BLE wake  ***************
 
-// The bound controller's BLE MAC is configured via the setup portal and stored
-// in NVS (see config.h: config.wakeAddr). When the machine is OFF and that
-// controller is advertising, we power on ("machine follows controller").
+// Bound controller BLE MACs are configured via the web UI and stored in NVS
+// (see config.h: config.wakeAddrs). When the machine is OFF and ANY of them is
+// advertising, we power on ("machine follows controller").
 
 // The controller counts as "present" while it has been seen within this window.
 // While OFF, presence => the machine powers on ("machine follows controller").
@@ -102,3 +128,30 @@ const unsigned long BLE_PRESENCE_TIMEOUT_MS = 4000;
 // machine follows it back on. It also rides out the brief reconnect-advertising
 // burst the controller emits when it loses its host at shutdown.
 const unsigned long BLE_WAKE_COOLDOWN_MS = 15000;
+
+//*******  BLE device discovery (web picker)  ***************
+//
+// The dashboard's "bind controller" picker runs an ACTIVE scan (it needs names,
+// so it can't be passive like the wake scan). NimBLE allows one scan at a time,
+// so while the picker is in use it replaces the passive wake scan and is
+// auto-ended when the UI stops polling; the wake scan resumes afterwards.
+
+// Picker scan cadence. Active scans on the C3 share the single radio with WiFi,
+// so keep the duty low (window <= interval).
+const uint16_t PICKER_SCAN_INTERVAL_MS = 120;
+const uint16_t PICKER_SCAN_WINDOW_MS   = 40;
+
+// End the picker scan this long after the last /api/ble/devices request, then
+// resume the passive wake scan.
+const unsigned long PICKER_IDLE_MS = 15000;
+
+//*******  MQTT / Home Assistant  ***************
+
+// Broker reconnect backoff: first retry after this long, doubling per failure
+// up to the cap. Reset on a successful connect and on any config change.
+const unsigned long MQTT_RETRY_START_MS = 5000;
+const unsigned long MQTT_RETRY_MAX_MS   = 60000;
+
+// Retained sense-voltage republish period while connected (mV is fairly stable
+// after oversampling, but this keeps the HA gauge fresh without spamming).
+const unsigned long MQTT_SENSE_PERIOD_MS = 5000;

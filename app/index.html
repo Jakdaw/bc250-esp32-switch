@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BC250 Switch Setup</title>
+  <title>BC250 Switch</title>
   <style>
     :root { --bg:#121212; --card:#1e1e1e; --fg:#eee; --muted:#9e9e9e;
             --accent:#ffd217; --accent2:#2c6bfd; --err:#ff5252; --ok:#4caf50; }
@@ -11,21 +11,32 @@
     body { margin:0; font-family:ui-monospace,Menlo,Consolas,monospace;
            background:var(--bg); color:var(--fg); min-height:100vh;
            display:flex; justify-content:center; align-items:flex-start; }
-    .wrap { width:100%; max-width:480px; padding:24px 16px; }
+    .wrap { width:100%; max-width:520px; padding:24px 16px; }
     h1 { color:var(--accent); font-size:20px; margin:8px 0 4px; }
     .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
     .card { background:var(--card); border-radius:12px; padding:18px; margin-bottom:16px; }
+    .card-title { font-size:15px; font-weight:bold; margin-bottom:10px; }
     label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-    input { width:100%; padding:11px; border-radius:8px; border:1px solid #333;
-            background:#161616; color:var(--fg); font:inherit; font-size:15px; }
+    input[type=text], input[type=password], input[type=number] {
+           width:100%; padding:11px; border-radius:8px; border:1px solid #333;
+           background:#161616; color:var(--fg); font:inherit; font-size:15px; }
+    input[type=checkbox] { transform:scale(1.4); margin-right:8px; vertical-align:middle; }
     button { width:100%; padding:12px; margin-top:16px; border:none; border-radius:8px;
              background:var(--accent); color:#000; font:inherit; font-weight:bold;
              font-size:15px; cursor:pointer; }
     button:disabled { opacity:.5; cursor:default; }
     button.secondary { background:transparent; color:var(--accent2); border:1px solid var(--accent2); }
+    button.danger { background:var(--err); color:#fff; }
     .msg { font-size:13px; margin-top:12px; min-height:18px; }
     .msg.err { color:var(--err); } .msg.ok { color:var(--ok); }
     .hidden { display:none; }
+    .banner { background:#3a3210; border:1px solid var(--accent); color:var(--accent);
+              border-radius:12px; padding:12px 16px; margin-bottom:16px; font-size:13px; }
+    .status-line { display:flex; gap:12px; align-items:center; flex-wrap:wrap; font-size:14px; }
+    #state-badge { font-weight:bold; font-size:18px; padding:4px 12px; border-radius:8px;
+                   background:#2a2715; color:var(--accent); }
+    #state-badge.on { background:#152a15; color:var(--ok); }
+    .net { color:var(--muted); font-size:12px; margin-top:10px; line-height:1.6; }
     .dev { display:flex; align-items:center; gap:10px; padding:11px; border-radius:8px;
            border:1px solid #333; margin-bottom:8px; cursor:pointer; background:#161616; }
     .dev.sel { border-color:var(--accent); background:#2a2715; }
@@ -33,47 +44,140 @@
     .dev .nm b { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .dev .nm small { color:var(--muted); }
     .dev .rssi { color:var(--muted); font-size:12px; white-space:nowrap; }
-    .row { display:flex; gap:10px; } .row > * { flex:1; }
+    .bound { display:flex; align-items:center; gap:8px; padding:10px; border-radius:8px;
+             border:1px solid #333; background:#161616; margin-bottom:8px; font-size:13px; }
+    .bound .addr { flex:1; }
+    .bound button { width:auto; margin:0; padding:6px 10px; background:transparent;
+                    color:var(--err); border:1px solid var(--err); font-size:12px; }
+    .row { display:flex; gap:10px; margin-top:12px; } .row > * { flex:1; }
     .scanning { color:var(--muted); font-size:12px; margin:6px 0; }
+    .danger-card { border:1px solid #5a2020; }
+    .danger-card .card-title { color:var(--err); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>BC250 Switch</h1>
-    <div class="sub" id="subtitle">Setup portal</div>
+    <div class="sub" id="subtitle">Loading…</div>
 
-    <!-- Password screen -->
-    <div class="card hidden" id="screen-pass">
-      <div id="pass-title" style="font-size:15px;font-weight:bold"></div>
-      <label for="pw">Password</label>
-      <input id="pw" type="password" autocomplete="new-password" />
-      <div id="confirm-wrap">
-        <label for="pw2">Confirm password</label>
-        <input id="pw2" type="password" autocomplete="new-password" />
-      </div>
-      <button id="pass-btn">Continue</button>
-      <div class="msg" id="pass-msg"></div>
+    <!-- Create-password gate (first boot, no password set) -->
+    <div class="card hidden" id="screen-create">
+      <div style="font-size:15px;font-weight:bold">Create a password</div>
+      <label for="cpw">Password (min 6 chars)</label>
+      <input id="cpw" type="password" autocomplete="new-password" />
+      <label for="cpw2">Confirm password</label>
+      <input id="cpw2" type="password" autocomplete="new-password" />
+      <button id="create-btn">Create &amp; continue</button>
+      <div class="msg" id="create-msg"></div>
     </div>
 
-    <!-- Device selection screen -->
-    <div class="card hidden" id="screen-dev">
-      <div style="font-size:15px;font-weight:bold">Select your controller</div>
-      <div class="sub" style="margin:6px 0 0">Turn the controller on so it appears below.</div>
-      <div class="scanning" id="scan-state">Scanning…</div>
-      <div id="dev-list"></div>
-      <label for="manual">Or enter a MAC manually</label>
-      <input id="manual" placeholder="aa:bb:cc:dd:ee:ff" />
-      <button id="save-btn" disabled>Bind controller &amp; finish</button>
-      <div class="msg" id="dev-msg"></div>
+    <!-- Login gate (password set, no session yet) -->
+    <div class="card hidden" id="screen-login">
+      <div style="font-size:15px;font-weight:bold">Unlock</div>
+      <label for="lpw">Password</label>
+      <input id="lpw" type="password" autocomplete="current-password" />
+      <button id="login-btn">Unlock</button>
+      <div class="msg" id="login-msg"></div>
+    </div>
+
+    <!-- Fallback-SoftAP banner -->
+    <div class="banner hidden" id="ap-banner">
+      Not connected to home WiFi — you are on the device's own network
+      (<b>BC250 Switch Setup</b>). Set your WiFi details below to join the LAN.
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dash" class="hidden">
+      <div class="card">
+        <div class="status-line">
+          <span id="state-badge">OFF</span>
+          <span id="board-info"></span>
+          <span id="ble-info"></span>
+        </div>
+        <div class="net" id="net-info"></div>
+        <div class="row">
+          <button id="btn-on">Power ON</button>
+          <button id="btn-off" class="secondary">Power OFF</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Controllers</div>
+        <div id="bound-list"></div>
+        <div class="scanning" id="scan-state"></div>
+        <div id="pick-list"></div>
+        <label for="manual">Or enter a MAC manually</label>
+        <input id="manual" type="text" placeholder="aa:bb:cc:dd:ee:ff" />
+        <div class="row">
+          <button id="btn-scan" class="secondary">Start scan</button>
+          <button id="btn-bind" disabled>Bind</button>
+        </div>
+        <div class="msg" id="ctrl-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">WiFi</div>
+        <label for="w-ssid">SSID</label>
+        <input id="w-ssid" type="text" autocomplete="off" />
+        <label for="w-pass">Password</label>
+        <input id="w-pass" type="text" autocomplete="off" />
+        <button id="btn-wifi">Save (applied live)</button>
+        <div class="msg" id="wifi-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">MQTT (Home Assistant)</div>
+        <label><input type="checkbox" id="m-enabled" /> Enabled</label>
+        <label for="m-host">Host</label>
+        <input id="m-host" type="text" autocomplete="off" placeholder="homeassistant.local" />
+        <div class="row">
+          <div>
+            <label for="m-port">Port</label>
+            <input id="m-port" type="number" value="1883" />
+          </div>
+          <div>
+            <label for="m-user">User</label>
+            <input id="m-user" type="text" autocomplete="off" />
+          </div>
+        </div>
+        <label for="m-pass">Password</label>
+        <input id="m-pass" type="text" autocomplete="off" />
+        <label for="m-name">Device name</label>
+        <input id="m-name" type="text" autocomplete="off" />
+        <button id="btn-mqtt">Save</button>
+        <div class="msg" id="mqtt-msg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Security</div>
+        <label for="npw">New password (min 6 chars)</label>
+        <input id="npw" type="password" autocomplete="new-password" />
+        <label for="npw2">Confirm</label>
+        <input id="npw2" type="password" autocomplete="new-password" />
+        <button id="btn-pass" class="secondary">Change password</button>
+        <div class="msg" id="pass-msg"></div>
+      </div>
+
+      <div class="card danger-card">
+        <div class="card-title">Danger zone</div>
+        <div class="scanning" style="margin:0 0 4px">Wipes all settings and reboots into the
+             setup network (SoftAP).</div>
+        <button id="btn-factory" class="danger">Factory reset</button>
+        <div class="msg" id="factory-msg"></div>
+      </div>
     </div>
   </div>
 
   <script>
     let token = null;
+    let lastStatus = null;
+    let pickerOn = false;
     let selected = null;
-    let pollTimer = null;
+    let statusTimer = null;
+    let pickerTimer = null;
 
     const $ = (id) => document.getElementById(id);
+    const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
 
     async function api(path, method = "GET", body = null) {
       const headers = {};
@@ -89,53 +193,139 @@
     }
 
     function show(screen) {
-      $("screen-pass").classList.toggle("hidden", screen !== "pass");
-      $("screen-dev").classList.toggle("hidden", screen !== "dev");
+      $("screen-create").classList.toggle("hidden", screen !== "create");
+      $("screen-login").classList.toggle("hidden", screen !== "login");
+      $("dash").classList.toggle("hidden", screen !== "dash");
     }
 
-    // --- Password screen ---
-    let creating = true;
-    function initPassScreen(passwordSet) {
-      creating = !passwordSet;
-      $("pass-title").textContent = creating ? "Create a portal password" : "Enter portal password";
-      $("confirm-wrap").classList.toggle("hidden", !creating);
-      $("pass-btn").textContent = creating ? "Create & continue" : "Unlock";
-      show("pass");
-    }
-
-    $("pass-btn").onclick = async () => {
-      const pw = $("pw").value;
-      const msg = $("pass-msg");
+    // --- Create / login gates ---
+    $("create-btn").onclick = async () => {
+      const msg = $("create-msg");
       msg.className = "msg";
-      if (creating) {
-        if (pw.length < 6) { msg.className = "msg err"; msg.textContent = "Min 6 characters."; return; }
-        if (pw !== $("pw2").value) { msg.className = "msg err"; msg.textContent = "Passwords don't match."; return; }
-      }
+      const pw = $("cpw").value;
+      if (pw.length < 6) { msg.className = "msg err"; msg.textContent = "Min 6 characters."; return; }
+      if (pw !== $("cpw2").value) { msg.className = "msg err"; msg.textContent = "Passwords don't match."; return; }
       try {
-        $("pass-btn").disabled = true;
-        const path = creating ? "/api/password" : "/api/login";
-        const data = await api(path, "POST", { password: pw });
+        $("create-btn").disabled = true;
+        const data = await api("/api/password", "POST", { password: pw });
         token = data.token;
-        gotoDeviceScreen();
+        enterDash();
       } catch (e) {
         msg.className = "msg err"; msg.textContent = e.message;
       } finally {
-        $("pass-btn").disabled = false;
+        $("create-btn").disabled = false;
       }
     };
 
-    // --- Device screen ---
-    function gotoDeviceScreen() {
-      show("dev");
-      pollDevices();
-      pollTimer = setInterval(pollDevices, 2000);
+    $("login-btn").onclick = async () => {
+      const msg = $("login-msg");
+      msg.className = "msg";
+      try {
+        $("login-btn").disabled = true;
+        const data = await api("/api/login", "POST", { password: $("lpw").value });
+        token = data.token;
+        enterDash();
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = e.message;
+      } finally {
+        $("login-btn").disabled = false;
+      }
+    };
+
+    // --- Dashboard ---
+    function enterDash() {
+      show("dash");
+      pollStatus();
+      statusTimer = setInterval(pollStatus, 2000);
     }
 
+    function fmtUptime(ms) {
+      let s = Math.floor(ms / 1000);
+      const d = Math.floor(s / 86400); s %= 86400;
+      const h = Math.floor(s / 3600); s %= 3600;
+      const m = Math.floor(s / 60); s %= 60;
+      if (d) return d + "d " + h + "h";
+      if (h) return h + "h " + m + "m";
+      return m + "m " + s + "s";
+    }
+
+    function renderStatus(st) {
+      const badge = $("state-badge");
+      badge.textContent = st.state;
+      badge.classList.toggle("on", st.state === "ON");
+      $("board-info").textContent =
+        "board " + (st.boardUp ? "UP" : "DOWN") + " · " + st.boardMv + " mV";
+      $("ble-info").textContent =
+        "controller " + (st.blePresent ? "present" : "absent");
+      let net;
+      if (st.wifi.connected) {
+        net = "LAN: " + st.wifi.ssid + " · " + st.wifi.ip + " · " + st.wifi.rssi + " dBm" +
+              "<br>mDNS: http://" + st.deviceName + ".local";
+      } else {
+        net = "LAN: not connected · fallback AP: 192.168.4.1";
+      }
+      if (st.mqtt.host) {
+        net += "<br>MQTT: " + st.mqtt.host + (st.mqtt.connected ? " (connected)" : " (not connected)");
+      }
+      net += "<br>uptime " + fmtUptime(st.uptimeMs);
+      $("net-info").innerHTML = net;
+      $("ap-banner").classList.toggle("hidden", !st.wifi.onSetupAp);
+      $("subtitle").textContent = st.deviceName + " · state " + st.state;
+      $("btn-on").disabled = st.state !== "OFF";
+      $("btn-off").disabled = st.state === "OFF";
+      renderBound(st);
+    }
+
+    function renderBound(st) {
+      const box = $("bound-list");
+      box.innerHTML = "";
+      if (!st.wakeAddrs.length) {
+        const el = document.createElement("div");
+        el.className = "scanning";
+        el.textContent = "No controllers bound — BLE wake is disabled.";
+        box.appendChild(el);
+        return;
+      }
+      for (const addr of st.wakeAddrs) {
+        const el = document.createElement("div");
+        el.className = "bound";
+        el.innerHTML = '<span class="addr">' + addr + "</span>";
+        const btn = document.createElement("button");
+        btn.textContent = "Remove";
+        btn.onclick = async () => {
+          try {
+            await api("/api/ble/remove", "POST", { addr });
+            pollStatus();
+          } catch (e) { flash("ctrl-msg", e.message); }
+        };
+        el.appendChild(btn);
+        box.appendChild(el);
+      }
+    }
+
+    async function pollStatus() {
+      try {
+        lastStatus = await api("/api/status");
+        renderStatus(lastStatus);
+      } catch (e) {
+        $("subtitle").textContent = "Cannot reach device: " + e.message;
+      }
+    }
+
+    // --- Controller binding: picker scan + manual MAC ---
     function rssiBars(r) {
       if (r >= -55) return "▂▄▆█";
       if (r >= -67) return "▂▄▆";
       if (r >= -80) return "▂▄";
       return "▂";
+    }
+
+    function refreshBind() {
+      $("btn-bind").disabled = !selected;
+      document.querySelectorAll("#pick-list .dev").forEach((el) => {
+        const addr = el.querySelector("small").textContent;
+        el.classList.toggle("sel", addr === selected);
+      });
     }
 
     async function pollDevices() {
@@ -144,8 +334,8 @@
         const list = (data.devices || []).sort((a, b) => b.rssi - a.rssi);
         $("scan-state").textContent = list.length
           ? "Scanning… " + list.length + " device(s) seen"
-          : "Scanning… (no devices yet)";
-        const box = $("dev-list");
+          : "Scanning… (no devices yet — turn the controller on)";
+        const box = $("pick-list");
         box.innerHTML = "";
         for (const d of list) {
           const el = document.createElement("div");
@@ -154,7 +344,7 @@
             '<div class="nm"><b>' + (d.name || "(unknown)") + "</b>" +
             "<small>" + d.addr + "</small></div>" +
             '<div class="rssi">' + rssiBars(d.rssi) + "<br>" + d.rssi + " dBm</div>";
-          el.onclick = () => { selected = d.addr; $("manual").value = ""; refreshSel(); };
+          el.onclick = () => { selected = d.addr; $("manual").value = ""; refreshBind(); };
           box.appendChild(el);
         }
       } catch (e) {
@@ -162,44 +352,146 @@
       }
     }
 
-    $("manual").oninput = () => {
-      const v = $("manual").value.trim().toLowerCase();
-      selected = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(v) ? v : null;
-      refreshSel();
-    };
-
-    function refreshSel() {
-      $("save-btn").disabled = !selected;
-      document.querySelectorAll(".dev").forEach((el) => {
-        const addr = el.querySelector("small").textContent;
-        el.classList.toggle("sel", addr === selected);
-      });
+    function stopPicker() {
+      pickerOn = false;
+      if (pickerTimer) clearInterval(pickerTimer);
+      pickerTimer = null;
+      $("btn-scan").textContent = "Start scan";
+      $("scan-state").textContent = "";
+      $("pick-list").innerHTML = "";
     }
 
-    $("save-btn").onclick = async () => {
-      const msg = $("dev-msg");
+    $("btn-scan").onclick = () => {
+      if (pickerOn) { stopPicker(); return; }
+      pickerOn = true;
+      $("btn-scan").textContent = "Stop scan";
+      pollDevices();
+      pickerTimer = setInterval(pollDevices, 2000);
+    };
+
+    $("manual").oninput = () => {
+      const v = $("manual").value.trim().toLowerCase();
+      selected = MAC_RE.test(v) ? v : null;
+      refreshBind();
+    };
+
+    $("btn-bind").onclick = async () => {
+      const msg = $("ctrl-msg");
       msg.className = "msg";
       try {
-        $("save-btn").disabled = true;
-        await api("/api/ble/select", "POST", { addr: selected });
-        await api("/api/finish", "POST", {});
-        if (pollTimer) clearInterval(pollTimer);
+        $("btn-bind").disabled = true;
+        const addr = selected;
+        await api("/api/ble/add", "POST", { addr });
+        stopPicker();
+        selected = null;
+        $("manual").value = "";
         msg.className = "msg ok";
-        msg.textContent = "Bound " + selected + ". Rebooting into normal mode…";
-        $("scan-state").textContent = "";
-        $("dev-list").innerHTML = "";
+        msg.textContent = "Bound " + addr + ".";
+        pollStatus();
       } catch (e) {
-        msg.className = "msg err"; msg.textContent = e.message;
-        $("save-btn").disabled = false;
+        flash("ctrl-msg", e.message);
+        $("btn-bind").disabled = false;
       }
     };
+
+    // --- Power ---
+    $("btn-on").onclick = async () => {
+      try { await api("/api/power", "POST", { action: "on" }); pollStatus(); }
+      catch (e) { $("subtitle").textContent = e.message; }
+    };
+    $("btn-off").onclick = async () => {
+      try { await api("/api/power", "POST", { action: "off" }); pollStatus(); }
+      catch (e) { $("subtitle").textContent = e.message; }
+    };
+
+    // --- WiFi ---
+    $("btn-wifi").onclick = async () => {
+      const msg = $("wifi-msg");
+      msg.className = "msg";
+      try {
+        $("btn-wifi").disabled = true;
+        await api("/api/wifi", "POST", { ssid: $("w-ssid").value.trim(), pass: $("w-pass").value });
+        msg.className = "msg ok";
+        msg.textContent = "Saved — applying live (connection may drop briefly).";
+      } catch (e) {
+        flash("wifi-msg", e.message);
+        $("btn-wifi").disabled = false;
+      }
+    };
+
+    // --- MQTT ---
+    $("btn-mqtt").onclick = async () => {
+      const msg = $("mqtt-msg");
+      msg.className = "msg";
+      try {
+        $("btn-mqtt").disabled = true;
+        await api("/api/mqtt", "POST", {
+          enabled: $("m-enabled").checked,
+          host: $("m-host").value.trim(),
+          port: parseInt($("m-port").value, 10),
+          user: $("m-user").value.trim(),
+          pass: $("m-pass").value,
+          name: $("m-name").value.trim(),
+        });
+        msg.className = "msg ok";
+        msg.textContent = "Saved.";
+      } catch (e) {
+        flash("mqtt-msg", e.message);
+        $("btn-mqtt").disabled = false;
+      }
+    };
+
+    // --- Security ---
+    $("btn-pass").onclick = async () => {
+      const msg = $("pass-msg");
+      msg.className = "msg";
+      const pw = $("npw").value;
+      if (pw.length < 6) { msg.className = "msg err"; msg.textContent = "Min 6 characters."; return; }
+      if (pw !== $("npw2").value) { msg.className = "msg err"; msg.textContent = "Passwords don't match."; return; }
+      try {
+        await api("/api/password", "POST", { password: pw });
+        token = null;  // server rotates the session token
+        msg.className = "msg ok";
+        msg.textContent = "Password changed — unlock again.";
+        show("login");
+        $("npw").value = ""; $("npw2").value = "";
+      } catch (e) {
+        flash("pass-msg", e.message);
+      }
+    };
+
+    // --- Factory reset ---
+    $("btn-factory").onclick = async () => {
+      const msg = $("factory-msg");
+      msg.className = "msg";
+      if (!confirm("Wipe ALL settings (password, WiFi, MQTT, controllers) and reboot?")) return;
+      try {
+        $("btn-factory").disabled = true;
+        await api("/api/factory", "POST");
+        msg.className = "msg ok";
+        msg.textContent = "Factory reset — rebooting into the setup network…";
+      } catch (e) {
+        flash("factory-msg", e.message);
+        $("btn-factory").disabled = false;
+      }
+    };
+
+    function flash(id, text) {
+      const el = $(id);
+      el.className = "msg err";
+      el.textContent = text;
+    }
 
     // --- Boot ---
     (async () => {
       try {
         const st = await api("/api/status");
-        if (st.wakeAddr) $("subtitle").textContent = "Currently bound: " + st.wakeAddr;
-        initPassScreen(st.passwordSet);
+        if (st.passwordSet) {
+          $("subtitle").textContent = st.deviceName;
+          show("login");
+        } else {
+          show("create");
+        }
       } catch (e) {
         $("subtitle").textContent = "Cannot reach device: " + e.message;
       }
