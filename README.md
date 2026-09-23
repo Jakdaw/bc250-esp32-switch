@@ -39,7 +39,7 @@ and the board.
 | GPIO5 | Momentary switch, terminal A | Read with internal pull-up |
 | GPIO6 | Momentary switch, terminal B | Driven LOW as the switch's ground |
 | GPIO4 | ATX `PS_ON#` (green wire) | **Open-drain**, active LOW: LOW = PSU on, released = off |
-| GPIO3 | BC250 `TPMS1` (pin 9) | ~3.3 V when the board is up, 0 when off |
+| GPIO3 | BC250 `TPMS1` (pin 9) | ~3.3 V when the board is up, 0 when off UPDATE: Easier to use a pin on J4003  - see below |
 | 5VSB / GND | PSU standby + common ground | Permanent power for the ESP |
 
 `PS_ON#` idles at ~5 V (pulled up inside the PSU). GPIO4 is driven open-drain so the
@@ -47,6 +47,12 @@ and the board.
 
 `TPMS1` is a higher-impedance signal that hovers near the logic threshold, so it's read
 as an analog voltage with hysteresis rather than a digital pin.
+
+fpasteau on BC250 Discord pointed out that it's much easier to sense board-power from
+the `J4003` header, which has a more convenient pitch and is right next to the power
+connectors and away from fans & 3D printed shrouds. Pin 12 on this header (though 6, 8
+or 10 would also be candidates) is actually an input pin for a fan sensor but is pulled
+high to 3.3v so can be used in exactly the same way as the pin on `TPMS1`.
 
 ### Connector pinouts
 
@@ -61,13 +67,13 @@ as an analog voltage with hysteresis rather than a digital pin.
                   +5V ─┤  6 │ 18 ├─ GND
                   GND ─┤  7 │ 19 ├─ GND
                PWR_OK ─┤  8 │ 20 ├─ (RSVD)
- ESP 5V/VIN ◄── +5VSB ─┤  9 │ 21 ├─ +5V
+ ESP 5V/VIN ──► +5VSB ─┤  9 │ 21 ├─ +5V
                  +12V ─┤ 10 │ 22 ├─ +5V
                  +12V ─┤ 11 │ 23 ├─ +5V
                 +3.3V ─┤ 12 │ 24 ├─ GND
 ```
 
-**TPMS1 header** — single pin for board-power sense:
+**TPMS1 header** — old suggestion as a single pin for board-power sense:
 
 ```
     PCICLK ─┤  1   2 ├─ GND
@@ -81,9 +87,23 @@ as an analog voltage with hysteresis rather than a digital pin.
        GND ─┤ 17  18 ├─ GND
 ```
 
-Pin 9 is the only TPMS1 pin used: it reads ~3.3 V when the board is powered and 0 V when
-off. No ground wire is needed from this header — the ESP already shares ground with the
-board through the ATX connector.
+**J4003 header** - better single pin for board-power sense:
+
+
+```
+                                                      ─┤     15 ├─ GND
+                                            FAN_CRTL# ─┤ 14  13 ├─ GND
+      GPIO3 ──► pin 12 used for sense  ──► SYSFANIN_H ─┤ 12  11 ├─ SYSFANOUT_H
+                                          AUXFANIN2_H ─┤ 10   9 ├─ AUXFANOUT2_H
+                                          AUXFANIN1_H ─┤  8   7 ├─ AUXFANOUT1_H
+                                          AUXFANIN0_H ─┤  6   5 ├─ AUXFANOUT0_H
+                                           CPUFANIN_H ─┤  4   3 ├─ CPUFANOUT_H
+                                                  GND ─┤  2   1 ├─ GND
+```
+
+J4003 Pin 12 is the only connection point on the BC250 used: it reads ~3.3 V when
+the board is powered and 0 V when off. No ground wire is needed from this header
+— the ESP already shares ground with the board through the ATX connector.
 
 ## Button controls
 
@@ -112,7 +132,7 @@ The button is the primary control and always works, even with no controller conf
 Served from SPIFFS at `/` (plus `/api/*`), always — on the LAN or from the fallback
 SoftAP (a banner tells you when you're on the fallback). Polls `/api/status` every 2 s.
 
-- **Status** — power state (OFF/BOOTING/ON), board up/down with TPMS1 voltage,
+- **Status** — power state (OFF/BOOTING/ON), board up/down with board-power sense voltage,
   controller presence, WiFi (SSID/IP/RSSI), MQTT connection, uptime.
 - **Power** — big ON/OFF buttons. "Off" is a hard PSU cut (same as the 5 s button
   hold); "on" while booting is a no-op; "off" while booting aborts the boot.
@@ -166,8 +186,8 @@ Home Assistant auto-discovers one device with three entities:
 | Entity | Type | Notes |
 |--------|------|-------|
 | `<device name>` (default `bc250-switch`) | switch | commands `ON` / `OFF` / `TOGGLE`; BOOTING reports as ON |
-| `board up` | binary_sensor | device class `power`; follows the TPMS1 sense |
-| `sense voltage` | sensor | TPMS1 reading in mV, refreshed every 5 s |
+| `board up` | binary_sensor | device class `power`; follows the board-power sense |
+| `sense voltage` | sensor | board-power sense reading in mV, refreshed every 5 s |
 
 Topics (uid = `bc250-switch-<mac>`, fixed for the hardware so entities survive renames):
 
